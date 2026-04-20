@@ -1,0 +1,26 @@
+###
+| 对象                   | 维度   | 元素类型   | 典型用途    | 生信例子                |
+| -------------------- | ---- | ------ | ------- | ------------------- |
+| vector               | 1维   | 同类型    | 单列数据    | 一个基因在所有样本中的表达       |
+| factor               | 1维   | 分类标签   | 分组变量    | High/Low，Alive/Dead |
+| matrix               | 2维   | 同类型    | 数值矩阵    | RNA-seq 表达矩阵        |
+| list                 | 任意   | 可不同类型  | 装多个对象   | 表达矩阵+临床表+结果         |
+| data.frame           | 2维   | 列可不同类型 | 表格数据    | 临床资料                |
+| tibble               | 2维   | 列可不同类型 | 现代化表格   | tidyverse 下的数据表     |
+| SummarizedExperiment | 高级容器 | 内部多对象  | 高通量数据整合 | TCGA表达数据对象          |
+
+1）data.frame 不是 matrix
+虽然都像二维表，但：
+matrix 要求所有元素同类型
+data.frame 每列类型可以不同
+2）data.frame 更接近 list，而不是更接近 matrix
+这是一个理解上的关键转折。
+因为 data.frame 本质上是“按列存储”的。
+一句话版本：
+vector：最基础的一列数据
+factor：分类版向量
+matrix：纯同类二维矩阵
+list：装各种对象的盒子
+data.frame：表格化的 list
+tibble：更现代的 data.frame
+SummarizedExperiment：生物信息整合容器
