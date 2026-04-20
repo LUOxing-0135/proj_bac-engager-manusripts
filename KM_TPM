@@ -1,0 +1,271 @@
+## =========================================================
+## TCGA-BLCA：基于 TPM 表达矩阵的 CD276 / TREM2 KM 生存分析
+## =========================================================
+
+## =========================
+## 0. 加载需要的包
+## =========================
+library(survival)
+library(survminer)
+
+## =========================
+## 1. 读取对象
+## =========================
+## TPM表达矩阵
+expr_mat  <- TCGA_BLCA_RNAseq_expression_matrix_tpm
+
+## 基因注释表
+gene_anno <- `TCGA-BLCA_gene_annotation`
+
+## 临床生存表
+## 需保证该对象已经提前构建好，包含：id, time, state
+## 例如：
+## TCGA_BLCA_clinical_sur
+
+## =========================
+## 2. 基本检查
+## =========================
+expr_mat <- as.matrix(expr_mat)
+
+if (!"gene_name" %in% colnames(gene_anno)) {
+  stop("TCGA-BLCA_gene_annotation 中不存在 gene_name 列。")
+}
+
+if (nrow(expr_mat) != nrow(gene_anno)) {
+  stop("表达矩阵与基因注释的行数不一致，不能直接按行对应替换 gene_name。")
+}
+
+## =========================
+## 3. 提取 gene_name，并去掉缺失或空值
+## =========================
+gene_name <- gene_anno$gene_name
+valid_idx <- !is.na(gene_name) & gene_name != ""
+
+expr_mat_valid  <- expr_mat[valid_idx, , drop = FALSE]
+gene_name_valid <- gene_name[valid_idx]
+
+## 用 gene_name 替换表达矩阵行名
+rownames(expr_mat_valid) <- gene_name_valid
+
+## =========================
+## 4. 将列名保留前 12 个字符
+##    TCGA barcode 前12位对应患者ID
+## =========================
+colnames(expr_mat_valid) <- substr(colnames(expr_mat_valid), 1, 12)
+
+## =========================
+## 5. 对重复 gene_name 合并
+##    每个样本保留最大表达值
+## =========================
+gene_split <- split(seq_len(nrow(expr_mat_valid)), rownames(expr_mat_valid))
+
+expr_mat_gene_max <- t(
+  sapply(gene_split, function(idx) {
+    if (length(idx) == 1) {
+      expr_mat_valid[idx, ]
+    } else {
+      apply(expr_mat_valid[idx, , drop = FALSE], 2, max, na.rm = TRUE)
+    }
+  })
+)
+
+expr_mat_gene_max <- as.matrix(expr_mat_gene_max)
+
+## =========================
+## 6. 检查处理后的表达矩阵
+## =========================
+cat("处理前维度：", dim(expr_mat), "\n")
+cat("处理后维度：", dim(expr_mat_gene_max), "\n")
+cat("是否还有重复 gene_name：", sum(duplicated(rownames(expr_mat_gene_max))), "\n")
+
+cat("前几个基因名：\n")
+print(head(rownames(expr_mat_gene_max)))
+
+cat("前几个患者ID：\n")
+print(head(colnames(expr_mat_gene_max)))
+
+## =========================
+## 7. 保存处理后的表达矩阵
+## =========================
+saveRDS(
+  expr_mat_gene_max,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_expression_geneName_max_patient12_tpm.rds"
+)
+
+write.csv(
+  expr_mat_gene_max,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_expression_geneName_max_patient12_tpm.csv"
+)
+
+## =========================
+## 8. 转换为患者 × 基因的表达表 expr_df
+## =========================
+## 原列名（患者ID）变成第一列 id
+## 原行名（基因名）变成列名
+expr_df <- as.data.frame(
+  t(expr_mat_gene_max),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+## 将原行名（此时为患者 ID）提取为第一列 id
+expr_df$id <- rownames(expr_df)
+
+## 修正患者 ID 中可能出现的 "." 为 "-"
+expr_df$id <- gsub("\\.", "-", expr_df$id)
+
+## 将 id 放到第一列
+expr_df <- expr_df[, c("id", setdiff(colnames(expr_df), "id")), drop = FALSE]
+
+## 删除行名
+rownames(expr_df) <- NULL
+
+## 检查 expr_df
+cat("expr_df 维度：", dim(expr_df), "\n")
+cat("前几个患者 ID：\n")
+print(head(expr_df$id))
+
+cat("前几个基因列名：\n")
+print(colnames(expr_df)[2:min(6, ncol(expr_df))])
+
+head(expr_df[, 1:min(6, ncol(expr_df)), drop = FALSE])
+str(expr_df[, 1:min(6, ncol(expr_df)), drop = FALSE])
+
+## =========================
+## 9. 合并临床生存表和表达表
+## =========================
+## 确保 id 为字符型
+TCGA_BLCA_clinical_sur$id <- as.character(TCGA_BLCA_clinical_sur$id)
+expr_df$id <- as.character(expr_df$id)
+
+## 找出共同 id
+common_id <- intersect(TCGA_BLCA_clinical_sur$id, expr_df$id)
+
+cat("共同 id 数量：", length(common_id), "\n")
+
+## 按共同 id 合并
+dat_merge <- merge(
+  TCGA_BLCA_clinical_sur[TCGA_BLCA_clinical_sur$id %in% common_id, , drop = FALSE],
+  expr_df[expr_df$id %in% common_id, , drop = FALSE],
+  by = "id"
+)
+
+## 检查合并结果
+cat("合并后维度：", dim(dat_merge), "\n")
+head(dat_merge[, 1:min(8, ncol(dat_merge)), drop = FALSE])
+
+## =========================
+## 10. 提取 KM 分析所需变量
+## =========================
+## 这里只保留：
+## id     : 患者 ID
+## time   : 生存时间
+## state  : 生存状态（通常 1=死亡, 0=删失）
+## CD276  : CD276 基因表达量
+## TREM2  : TREM2 基因表达量
+dat_km <- dat_merge[, c("id", "time", "state", "CD276", "TREM2")]
+
+## 去掉关键变量缺失的样本
+dat_km <- dat_km[complete.cases(dat_km[, c("time", "state", "CD276", "TREM2")]), ]
+
+## 类型转换
+dat_km$time  <- as.numeric(dat_km$time)
+dat_km$state <- as.numeric(dat_km$state)
+dat_km$CD276 <- as.numeric(dat_km$CD276)
+dat_km$TREM2 <- as.numeric(dat_km$TREM2)
+
+## 检查
+cat("dat_km 维度：", dim(dat_km), "\n")
+head(dat_km)
+str(dat_km)
+
+## =========================
+## 11. 按中位数分组
+## =========================
+dat_km$CD276_group <- ifelse(
+  dat_km$CD276 >= median(dat_km$CD276, na.rm = TRUE),
+  "High",
+  "Low"
+)
+
+dat_km$TREM2_group <- ifelse(
+  dat_km$TREM2 >= median(dat_km$TREM2, na.rm = TRUE),
+  "High",
+  "Low"
+)
+
+## 转为因子，指定顺序
+dat_km$CD276_group <- factor(dat_km$CD276_group, levels = c("Low", "High"))
+dat_km$TREM2_group <- factor(dat_km$TREM2_group, levels = c("Low", "High"))
+
+## 查看分组情况
+cat("CD276 分组情况：\n")
+print(table(dat_km$CD276_group))
+
+cat("TREM2 分组情况：\n")
+print(table(dat_km$TREM2_group))
+
+## =========================
+## 12. 拟合并绘制 CD276 的 KM 曲线
+## =========================
+fit_CD276 <- survfit(Surv(time, state) ~ CD276_group, data = dat_km)
+
+p_CD276 <- ggsurvplot(
+  fit_CD276,
+  data = dat_km,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE,
+  xlab = "Time (days)",
+  ylab = "Overall survival probability",
+  title = "KM curve of CD276 in TCGA-BLCA (TPM)",
+  legend.title = "CD276",
+  legend.labs = c("Low", "High"),
+  surv.median.line = "hv"
+)
+
+p_CD276
+
+## =========================
+## 13. 拟合并绘制 TREM2 的 KM 曲线
+## =========================
+fit_TREM2 <- survfit(Surv(time, state) ~ TREM2_group, data = dat_km)
+
+p_TREM2 <- ggsurvplot(
+  fit_TREM2,
+  data = dat_km,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE,
+  xlab = "Time (days)",
+  ylab = "Overall survival probability",
+  title = "KM curve of TREM2 in TCGA-BLCA (TPM)",
+  legend.title = "TREM2",
+  legend.labs = c("Low", "High"),
+  surv.median.line = "hv"
+)
+
+p_TREM2
+
+## =========================
+## 14. 保存 KM 分析底表和图形结果
+## =========================
+saveRDS(
+  dat_km,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_dat_km_tpm.rds"
+)
+
+write.csv(
+  dat_km,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_dat_km_tpm.csv",
+  row.names = FALSE
+)
+
+## 保存 KM 曲线为 PDF
+pdf("E:/A1_Engager/data_raw/RNAseq/KM_CD276_TCGA_BLCA_TPM.pdf", width = 8, height = 7)
+print(p_CD276)
+dev.off()
+
+pdf("E:/A1_Engager/data_raw/RNAseq/KM_TREM2_TCGA_BLCA_TPM.pdf", width = 8, height = 7)
+print(p_TREM2)
+dev.off()
