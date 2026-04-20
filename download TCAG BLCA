@@ -1,0 +1,172 @@
+## ============下载 TCGA-BLCA 临床数据和转录组数据=================
+## ================================
+## 1. 安装并加载必要包
+## ================================
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("TCGAbiolinks", quietly = TRUE)) {
+  BiocManager::install("TCGAbiolinks", ask = FALSE, update = FALSE)
+}
+
+if (!requireNamespace("SummarizedExperiment", quietly = TRUE)) {
+  BiocManager::install("SummarizedExperiment", ask = FALSE, update = FALSE)
+}
+
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+
+## ================================
+## 2. 设置保存路径
+## Windows 路径建议用 / 或 \\
+## ================================
+
+base_dir <- "E:/A1_Engager/data_raw"
+
+if (!dir.exists(base_dir)) {
+  dir.create(base_dir, recursive = TRUE)
+}
+
+## 建议分开存放临床和RNA-seq数据
+clinical_dir <- file.path(base_dir, "clinical")
+rna_dir      <- file.path(base_dir, "RNAseq")
+
+dir.create(clinical_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(rna_dir, showWarnings = FALSE, recursive = TRUE)
+
+## 为了减少 Windows 下载超时问题，可以适当增大超时时间
+options(timeout = 600)
+
+## ================================
+## 3. 下载并保存临床数据
+## ================================
+
+clinical_blca <- GDCquery_clinic(
+  project = "TCGA-BLCA",
+  type = "clinical"
+)
+
+## 保存为 csv
+write.csv(
+  clinical_blca,
+  file = file.path(clinical_dir, "TCGA-BLCA_clinical.csv"),
+  row.names = FALSE
+)
+
+## 同时保存 R 对象，后续读取更方便
+saveRDS(
+  clinical_blca,
+  file = file.path(clinical_dir, "TCGA-BLCA_clinical.rds")
+)
+
+## 查看临床数据基本情况
+dim(clinical_blca)
+head(clinical_blca[, 1:min(10, ncol(clinical_blca))])
+
+## ================================
+## 4. 查询 TCGA-BLCA RNA-seq 转录组数据
+## 当前推荐 workflow: STAR - Counts
+## ================================
+
+query_exp <- GDCquery(
+  project = "TCGA-BLCA",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts"
+)
+
+## 查看将要下载的文件信息
+getResults(query_exp)[1:5, ]
+
+## ================================
+## 5. 下载 RNA-seq 原始文件
+## method = "api" 一般更适合本地 RStudio 直接下载
+## files.per.chunk 可减少大批量下载失败概率
+## ================================
+
+GDCdownload(
+  query = query_exp,
+  method = "api",
+  directory = rna_dir,
+  files.per.chunk = 20
+)
+
+## ================================
+## 6. 整理为可分析对象
+## GDCprepare 返回 SummarizedExperiment 对象
+## ================================
+
+blca_exp_se <- GDCprepare(
+  query = query_exp,
+  directory = rna_dir
+)
+
+## 保存整理后的对象
+saveRDS(
+  blca_exp_se,
+  file = file.path(rna_dir, "TCGA-BLCA_RNAseq_STAR_Counts_SE.rds")
+)
+
+## ================================
+## 7. 提取表达矩阵并保存
+## assay(...) 提取基因表达矩阵
+## 对 STAR - Counts，通常 assay 名称可能不止一个
+## 先查看有哪些 assay
+## ================================
+
+assayNames(blca_exp_se)
+
+## 常见做法：先取第一个 assay
+exp_mat <- assay(blca_exp_se)
+
+## 保存表达矩阵
+write.csv(
+  exp_mat,
+  file = file.path(rna_dir, "TCGA-BLCA_RNAseq_expression_matrix.csv")
+)
+
+saveRDS(
+  exp_mat,
+  file = file.path(rna_dir, "TCGA-BLCA_RNAseq_expression_matrix.rds")
+)
+
+## ================================
+## 8. 保存样本注释信息（列信息）和基因注释信息（行信息）
+## ================================
+
+sample_anno <- as.data.frame(colData(blca_exp_se))
+gene_anno   <- as.data.frame(rowData(blca_exp_se))
+
+write.csv(
+  sample_anno,
+  file = file.path(rna_dir, "TCGA-BLCA_sample_annotation.csv"),
+  row.names = TRUE
+)
+
+write.csv(
+  gene_anno,
+  file = file.path(rna_dir, "TCGA-BLCA_gene_annotation.csv"),
+  row.names = TRUE
+)
+
+saveRDS(
+  sample_anno,
+  file = file.path(rna_dir, "TCGA-BLCA_sample_annotation.rds")
+)
+
+saveRDS(
+  gene_anno,
+  file = file.path(rna_dir, "TCGA-BLCA_gene_annotation.rds")
+)
+
+## ================================
+## 9. 简单检查
+## ================================
+
+cat("Clinical data dimension:", dim(clinical_blca), "\n")
+cat("Expression matrix dimension:", dim(exp_mat), "\n")
+cat("Number of assays:", length(assayNames(blca_exp_se)), "\n")
+cat("Assay names:", paste(assayNames(blca_exp_se), collapse = ", "), "\n")
+
