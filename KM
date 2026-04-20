@@ -94,3 +94,210 @@ ggsurvplot(
   conf.int = FALSE
 )
 
+##########################################################################
+## =========================
+## 1. 读取对象
+## =========================
+expr_mat <- `TCGA-BLCA_RNAseq_expression_matrix`
+gene_anno <- `TCGA-BLCA_gene_annotation`
+
+## =========================
+## 2. 基本检查
+## =========================
+expr_mat <- as.matrix(expr_mat)
+
+cat("表达矩阵维度:", dim(expr_mat), "\n")
+cat("基因注释维度:", dim(gene_anno), "\n")
+
+if (nrow(expr_mat) != nrow(gene_anno)) {
+  stop("表达矩阵和基因注释的行数不一致，不能直接按行对应替换 gene_name。")
+}
+
+if (!"gene_name" %in% colnames(gene_anno)) {
+  stop("gene_anno 中不存在 gene_name 列。")
+}
+
+## =========================
+## 3. 提取 gene_name
+## =========================
+gene_name <- gene_anno$gene_name
+
+## 去掉 gene_name 缺失或空值的行
+valid_idx <- !is.na(gene_name) & gene_name != ""
+
+expr_mat_valid <- expr_mat[valid_idx, , drop = FALSE]
+gene_name_valid <- gene_name[valid_idx]
+
+## 将 gene_name 设为行名
+rownames(expr_mat_valid) <- gene_name_valid
+
+## =========================
+## 4. 对重复 gene_name 合并
+##    每个样本保留最大表达值
+## =========================
+gene_split <- split(seq_len(nrow(expr_mat_valid)), rownames(expr_mat_valid))
+
+expr_mat_gene_max <- t(
+  sapply(gene_split, function(idx) {
+    if (length(idx) == 1) {
+      expr_mat_valid[idx, ]
+    } else {
+      apply(expr_mat_valid[idx, , drop = FALSE], 2, max, na.rm = TRUE)
+    }
+  })
+)
+
+expr_mat_gene_max <- as.matrix(expr_mat_gene_max)
+
+## =========================
+## 5. 检查结果
+## =========================
+cat("处理后表达矩阵维度:", dim(expr_mat_gene_max), "\n")
+cat("前几个 gene_name:\n")
+print(head(rownames(expr_mat_gene_max)))
+
+## 查看是否还有重复 gene_name
+cat("重复 gene_name 数量:", sum(duplicated(rownames(expr_mat_gene_max))), "\n")
+
+## =========================
+## 6. 保存结果
+## =========================
+saveRDS(
+  expr_mat_gene_max,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_expression_by_gene_name_max.rds"
+)
+
+write.csv(
+  expr_mat_gene_max,
+  file = "E:/A1_Engager/data_raw/RNAseq/TCGA-BLCA_expression_by_gene_name_max.csv"
+)
+
+
+###################################################################################
+
+## =========================================
+## 将 expr_mat_gene_max 从“基因 × 患者”转换为“患者 × 基因”
+## - 原列名（患者ID）变成第一列：id
+## - 原行名（基因名）变成新的列名
+## - 保留列名中的 "-"，不自动改成 "."
+## =========================================
+
+## 1. 基本检查
+if (is.null(rownames(expr_mat_gene_max))) {
+  stop("expr_mat_gene_max 没有行名，无法将基因名转为列名。")
+}
+
+if (is.null(colnames(expr_mat_gene_max))) {
+  stop("expr_mat_gene_max 没有列名，无法提取患者 ID。")
+}
+
+## 2. 转置矩阵，并保留原始列名格式
+expr_df <- as.data.frame(
+  t(expr_mat_gene_max),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+## 3. 将原行名（此时为患者 ID）提取为第一列 id
+expr_df$id <- rownames(expr_df)
+
+## 4. 调整列顺序，把 id 放到第一列
+expr_df <- expr_df[, c("id", setdiff(colnames(expr_df), "id")), drop = FALSE]
+
+## 5. 删除行名，避免后续与 id 列重复
+rownames(expr_df) <- NULL
+
+## 6. 检查结果
+cat("expr_df 维度：", dim(expr_df), "\n")
+cat("前几个患者 ID：\n")
+print(head(expr_df$id))
+
+cat("前几个基因列名：\n")
+print(colnames(expr_df)[2:min(6, ncol(expr_df))])
+
+## 7. 查看前几行
+head(expr_df[, 1:min(6, ncol(expr_df)), drop = FALSE])
+
+## 8. 查看结构
+str(expr_df[, 1:min(6, ncol(expr_df)), drop = FALSE])
+
+
+####相同id进行数据合并
+## 1. 先确保 id 都是字符型，避免因类型不同导致匹配失败
+TCGA_BLCA_clinical_sur$id <- as.character(TCGA_BLCA_clinical_sur$id)
+expr_df$id <- as.character(expr_df$id)
+
+## 2. 找出共同的 id
+common_id <- intersect(TCGA_BLCA_clinical_sur$id, expr_df$id)
+
+## 3. 分别保留共同 id 对应的行
+clinical_sub <- TCGA_BLCA_clinical_sur[TCGA_BLCA_clinical_sur$id %in% common_id, , drop = FALSE]
+expr_sub <- expr_df[expr_df$id %in% common_id, , drop = FALSE]
+
+## 4. 按 id 合并
+dat_merge <- merge(clinical_sub, expr_sub, by = "id")
+
+## 5. 检查结果
+cat("共同 id 数量：", length(common_id), "\n")
+cat("合并后数据维度：", dim(dat_merge), "\n")
+
+head(dat_merge[, 1:min(8, ncol(dat_merge)), drop = FALSE])
+str(dat_merge[, 1:min(8, ncol(dat_merge)), drop = FALSE])
+
+### km曲线
+
+library(survival)
+library(survminer)
+
+## 提取分析数据
+dat_km <- dat_merge[, c("id", "time", "state", "CD276", "TREM2")]
+dat_km <- dat_km[complete.cases(dat_km[, c("time", "state", "CD276", "TREM2")]), ]
+
+## 类型转换
+dat_km$time <- as.numeric(dat_km$time)
+dat_km$state <- as.numeric(dat_km$state)
+dat_km$CD276 <- as.numeric(dat_km$CD276)
+dat_km$TREM2 <- as.numeric(dat_km$TREM2)
+
+## 中位数分组
+dat_km$CD276_group <- ifelse(dat_km$CD276 >= median(dat_km$CD276, na.rm = TRUE), "High", "Low")
+dat_km$TREM2_group <- ifelse(dat_km$TREM2 >= median(dat_km$TREM2, na.rm = TRUE), "High", "Low")
+
+dat_km$CD276_group <- factor(dat_km$CD276_group, levels = c("Low", "High"))
+dat_km$TREM2_group <- factor(dat_km$TREM2_group, levels = c("Low", "High"))
+
+## CD276 KM
+fit_CD276 <- survfit(Surv(time, state) ~ CD276_group, data = dat_km)
+p_CD276 <- ggsurvplot(
+  fit_CD276,
+  data = dat_km,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE,
+  xlab = "Time (days)",
+  ylab = "Overall survival probability",
+  title = "KM curve of CD276 in TCGA-BLCA",
+  legend.title = "CD276",
+  legend.labs = c("Low", "High"),
+  surv.median.line = "hv"
+)
+p_CD276
+
+## TREM2 KM
+fit_TREM2 <- survfit(Surv(time, state) ~ TREM2_group, data = dat_km)
+p_TREM2 <- ggsurvplot(
+  fit_TREM2,
+  data = dat_km,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE,
+  xlab = "Time (days)",
+  ylab = "Overall survival probability",
+  title = "KM curve of TREM2 in TCGA-BLCA",
+  legend.title = "TREM2",
+  legend.labs = c("Low", "High"),
+  surv.median.line = "hv"
+)
+p_TREM2
+
+
