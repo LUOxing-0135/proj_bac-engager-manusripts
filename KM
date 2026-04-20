@@ -1,0 +1,96 @@
+## 1）确认表达矩阵行名和列名
+dim(exp_mat)
+head(rownames(exp_mat))
+head(colnames(exp_mat))
+## 确认基因注释表里有没有 symbol 信息
+colnames(gene_anno)
+head(gene_anno[, 1:min(10, ncol(gene_anno))])
+## 3)确认临床数据里有哪些生存字段
+colnames(clinical_blca)
+grep("days|vital|follow|death|status", colnames(clinical_blca), value = TRUE)
+## 4）确认样本和患者 ID 的匹配方式
+head(substr(colnames(exp_mat), 1, 12))
+head(clinical_blca$submitter_id)
+## 需要的包
+library(dplyr)
+library(survival)
+library(survminer)
+
+## ---------------------------
+## 1. 表达矩阵整理
+## ---------------------------
+expr_df <- as.data.frame(exp_mat)
+
+# 如果行名是基因名，可直接提取
+cd276_expr <- as.numeric(expr_df["CD276", ])
+trem2_expr <- as.numeric(expr_df["TREM2", ])
+
+expr_gene <- data.frame(
+  sample_barcode = colnames(expr_df),
+  CD276 = cd276_expr,
+  TREM2 = trem2_expr,
+  stringsAsFactors = FALSE
+)
+
+# 提取患者ID（前12位）
+expr_gene$patient_id <- substr(expr_gene$sample_barcode, 1, 12)
+
+## ---------------------------
+## 2. 临床数据整理
+## ---------------------------
+clinical2 <- clinical_blca %>%
+  mutate(
+    patient_id = submitter_id,
+    OS.time = ifelse(
+      !is.na(days_to_death),
+      days_to_death,
+      days_to_last_follow_up
+    ),
+    OS.status = ifelse(vital_status == "Dead", 1, 0) ## dead是1
+  ) %>%
+  select(patient_id, OS.time, OS.status)
+
+## ---------------------------
+## 3. 合并表达与临床
+## ---------------------------
+dat <- inner_join(clinical2, expr_gene, by = "patient_id")
+
+## 去掉缺失
+dat <- dat %>%
+  filter(!is.na(OS.time), !is.na(OS.status), !is.na(CD276), !is.na(TREM2))
+
+## ---------------------------
+## 4. 中位数分组
+## ---------------------------
+dat <- dat %>%
+  mutate(
+    CD276_group = ifelse(CD276 >= median(CD276, na.rm = TRUE), "High", "Low"),
+    TREM2_group = ifelse(TREM2 >= median(TREM2, na.rm = TRUE), "High", "Low")
+  )
+
+## ---------------------------
+## 5. KM分析：CD276
+## ---------------------------
+fit_cd276 <- survfit(Surv(OS.time, OS.status) ~ CD276_group, data = dat)
+
+ggsurvplot(
+  fit_cd276,
+  data = dat,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE
+)
+
+## ---------------------------
+## 6. KM分析：TREM2
+## ---------------------------
+fit_trem2 <- survfit(Surv(OS.time, OS.status) ~ TREM2_group, data = dat)
+
+ggsurvplot(
+  fit_trem2,
+  data = dat,
+  pval = TRUE,
+  risk.table = TRUE,
+  conf.int = FALSE
+)
+
